@@ -14,10 +14,13 @@
  *   TITLE      (Game Night)    heading on the page
  *   BOARD      (default)       board name when the URL doesn't name one
  *   POLL_MS    (25000)         how long a sync request may wait
+ *   ADMIN_PIN  (unset)         PIN required to delete a recorded result;
+ *                              unset means results can't be deleted at all
  */
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
 import { extname, join, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from './lib/store.mjs';
@@ -28,7 +31,54 @@ const DATA_DIR = process.env.DATA_DIR || '/data';
 const TITLE = process.env.TITLE || 'Game Night';
 const BOARD = process.env.BOARD || 'default';
 const POLL_MS = Number(process.env.POLL_MS || 25000);
+const ADMIN_PIN = String(process.env.ADMIN_PIN || '');
 const MAX_BODY = 1024 * 1024;
+
+/*
+ * Deleting a recorded result.
+ *
+ * The board has no accounts: everyone on the network who can reach the IP is
+ * effectively signed in, which is fine for scoring a game night and not fine
+ * for erasing the record of one. So a delete has to carry ADMIN_PIN, checked
+ * here rather than in the page — the browser is never told whether a guess
+ * was right, and never sees the PIN itself.
+ *
+ * A short PIN over a LAN would otherwise fall to a few thousand guesses, so
+ * wrong answers are throttled: five, then the door is shut for a minute. The
+ * lock is global rather than per-IP on purpose, because the attacker here is
+ * a child on the same network who could trivially change their address.
+ */
+const PIN_TRIES = 5;
+const PIN_LOCK_MS = 60000;
+const pinGate = { misses: 0, until: 0 };
+
+function pinOk(given) {
+  const a = Buffer.from(String(given == null ? '' : given), 'utf8');
+  const b = Buffer.from(ADMIN_PIN, 'utf8');
+  return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
+}
+
+// null when the delete may go ahead; otherwise the reason it may not.
+function checkDelete(given) {
+  if (!ADMIN_PIN) {
+    return 'Deleting results is switched off. Set ADMIN_PIN on the container to turn it on.';
+  }
+  const now = Date.now();
+  if (now < pinGate.until) {
+    return `Too many wrong PINs — try again in ${Math.ceil((pinGate.until - now) / 1000)}s.`;
+  }
+  if (pinOk(given)) { pinGate.misses = 0; return null; }
+  pinGate.misses++;
+  if (pinGate.misses >= PIN_TRIES) {
+    pinGate.misses = 0;
+    pinGate.until = now + PIN_LOCK_MS;
+    console.warn(`[admin] ${PIN_TRIES} wrong PINs — deleting locked for ${PIN_LOCK_MS / 1000}s`);
+    return `Too many wrong PINs — try again in ${PIN_LOCK_MS / 1000}s.`;
+  }
+  return 'Wrong PIN.';
+}
+
+const isDelete = (q) => /^\s*DELETE\b/i.test(String(q || ''));
 
 // Read from the bundled card so there is one version to keep in step.
 const VERSION = (() => {
@@ -113,7 +163,12 @@ const server = createServer(async (req, res) => {
     }
 
     if (path === '/api/config') {
-      return json(res, 200, { title: TITLE, board, poll_ms: POLL_MS, version: 1 });
+      // 'pin' tells the page to offer the delete control and ask for a PIN.
+      // The PIN itself stays here.
+      return json(res, 200, {
+        title: TITLE, board, poll_ms: POLL_MS, version: 1,
+        delete: ADMIN_PIN ? 'pin' : 'off',
+      });
     }
 
     // Current tournament. `rev` turns it into a long poll: the request waits
@@ -149,10 +204,15 @@ const server = createServer(async (req, res) => {
     }
 
     if (path === '/api/query') {
-      const q = req.method === 'GET'
-        ? url.searchParams.get('q')
-        : (JSON.parse((await readBody(req)) || '{}').q || '');
+      const body = req.method === 'GET' ? {} : JSON.parse((await readBody(req)) || '{}');
+      const q = req.method === 'GET' ? url.searchParams.get('q') : (body.q || '');
       if (!q) return json(res, 400, { error: 'q is required' });
+      if (isDelete(q)) {
+        const refused = checkDelete(req.method === 'GET' ? url.searchParams.get('pin') : body.pin);
+        if (refused) return json(res, 403, { error: refused });
+        // Leave a trail: what was removed, and when.
+        console.log(`[admin] ${new Date().toISOString()} delete: ${q}`);
+      }
       const out = store.query(q);
       const failed = out.results.find((r) => r.error);
       return json(res, failed ? 400 : 200, out);
@@ -185,6 +245,10 @@ server.listen(PORT, () => {
   // wrong in someone else's logs, so lead with them.
   console.log(`bracket-board ${VERSION} — running as uid ${process.getuid ? process.getuid() : 'n/a'}`);
   console.log(`listening on http://0.0.0.0:${port} — data in ${store.stats().file}`);
+  // Say out loud whether results can be erased, so it is never a surprise.
+  if (!ADMIN_PIN) console.log('[admin] ADMIN_PIN is not set — recorded results cannot be deleted');
+  else if (ADMIN_PIN.length < 4) console.warn(`[admin] ADMIN_PIN is only ${ADMIN_PIN.length} characters — use at least 4`);
+  else console.log('[admin] deleting a result requires the PIN');
   // Say straight away whether the data folder works, rather than looking
   // healthy until the first save.
   if (!store.checkWritable()) {

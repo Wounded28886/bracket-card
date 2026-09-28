@@ -20,6 +20,7 @@ services:
       - ./data:/data
     environment:
       TITLE: "Game Night"
+      # ADMIN_PIN: "4821"   # PIN to delete a result; unset means you can't
       # BOARD: default      # board used when the URL doesn't name one
       # PORT: 8099          # port inside the container
       # POLL_MS: 25000      # how long a sync request may wait

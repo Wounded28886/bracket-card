@@ -237,6 +237,39 @@ tracking:
 | `game`     | string  | —              | Preselect the game filter                                |
 | `view`     | string  | `champions`    | Which tab opens first: `champions`, `league`, `h2h` or `history` |
 | `sort`     | string  | `wins`         | Leaderboard order: `wins`, `rate`, `points` or `rating`  |
+| `allow_delete` | boolean | `false`    | Offer a delete control on the History tab — see below    |
+
+## Deleting a result
+
+Someone eventually wins on a technicality, or a name gets typed wrong, and the
+record needs correcting. Set `allow_delete: true` on the history card and each
+row on the **History** tab grows a faint `✕`. It asks first, naming the result
+it would remove, and then deletes that one point — addressed by its timestamp
+and narrowed by the game and format tags, so it can't take anything else with
+it.
+
+It is off unless you ask for it, and even then it is not open to everyone:
+
+- **In Home Assistant**, only **admin** accounts see the control at all. A
+  child's account renders the same card without it. Nothing extra to configure
+  — the delete goes through the `game_night_query` command you already have
+  (InfluxDB 1.x accepts a `DELETE` over that endpoint; if yours refuses, add a
+  `POST` command and point `tracking.delete_service` at it).
+- **On the standalone board** there are no accounts — anyone who can reach the
+  IP is effectively signed in — so it asks for a PIN, set as `ADMIN_PIN` on the
+  container. The *server* checks it: the PIN is never sent to the browser, a
+  wrong guess is thrown away without saying which digit was wrong, and five
+  misses lock deleting for a minute so a four-digit PIN can't be walked
+  through. With no `ADMIN_PIN` set, nothing can be deleted at all, by the page
+  or by anything else that finds the API.
+
+If you want it airtight in Home Assistant, put the card with `allow_delete` on
+a dashboard the children's accounts can't open (`visible:` in the dashboard
+config) and leave it off the one on the wall.
+
+Deleting a king-of-the-hill result that is still the live lineage takes the
+reigning champion and the run of defences with it; the confirmation says so
+before you commit.
 
 ## The Hall of Fame
 

@@ -335,6 +335,130 @@ async function playOut(card, hassFor) {
   hErr.hass = { states: {}, callWS: async () => { throw new Error('Service rest_command.game_night_query not found'); } };
   await tick(); await tick();
   ok(/Couldn't load results: Service rest_command.game_night_query not found/.test(hErr.shadowRoot.textContent), 'history shows load error');
+
+  // ---- deleting a result ----
+  // A card whose rows are served fresh from `live`, so a delete can be seen
+  // to take effect.
+  const makeCard = async (cfg, extraHass) => {
+    let live = values.slice();
+    const sent = [];
+    const card = document.createElement('bracket-history-card');
+    card.setConfig({ title: 'Hall of Fame', ...cfg });
+    card.hass = {
+      states: {},
+      ...extraHass,
+      callWS: async (msg) => {
+        sent.push(msg);
+        const q = msg.service_data.q;
+        if (/^DELETE/i.test(q)) {
+          if (extraHass && extraHass.__refuse) throw new Error(extraHass.__refuse);
+          const t = Number((q.match(/time >= (\d+)s/) || [])[1]);
+          live = live.filter((v) => v[0] !== t);
+          return { response: { status: 200, content: { results: [{ statement_id: 0 }] } } };
+        }
+        return { response: { status: 200, content: { results: [{ series: [{ name: 'result', columns: cols, values: live }] }] } } };
+      },
+    };
+    await tick(); await tick();
+    card.shadowRoot.querySelector('[data-view="history"]').onclick();
+    return { card, sent, rows: () => live.length };
+  };
+  const admin = { user: { is_admin: true, name: 'Dad' } };
+  const kid = { user: { is_admin: false, name: 'Atlas' } };
+
+  // Nothing at all unless the dashboard config asks for it.
+  const offCard = await makeCard({}, admin);
+  ok(!offCard.card.shadowRoot.querySelector('[data-del]'), 'no delete control without allow_delete');
+  // …and, with it, still nothing for a child's account.
+  const kidCard = await makeCard({ allow_delete: true }, kid);
+  ok(!kidCard.card.shadowRoot.querySelector('[data-del]'), 'a non-admin user never sees the delete control');
+  // …nor when the card cannot tell who is looking.
+  const anonCard = await makeCard({ allow_delete: true }, {});
+  ok(!anonCard.card.shadowRoot.querySelector('[data-del]'), 'an unknown user is denied, not allowed');
+
+  // An admin in Home Assistant: a control per row, a confirmation, no PIN.
+  const a = await makeCard({ allow_delete: true }, admin);
+  const dels = a.card.shadowRoot.querySelectorAll('[data-del]');
+  ok(dels.length === values.length, `an admin gets one delete control per result (${dels.length})`);
+  ok(!a.card.shadowRoot.querySelector('.delbox'), 'and no confirmation until one is clicked');
+  const target = values[3];   // Atlas at Mario Kart
+  a.card.shadowRoot.querySelector(`[data-del="${target[0]}"]`).onclick();
+  const box = a.card.shadowRoot.querySelector('.delbox');
+  ok(!!box && /Atlas/.test(box.textContent) && /Mario Kart/.test(box.textContent),
+     'the confirmation names the result it would delete');
+  ok(!box.querySelector('#del-pin'), 'no PIN is asked for in Home Assistant');
+  a.card.shadowRoot.querySelector('#del-cancel').onclick();
+  ok(!a.card.shadowRoot.querySelector('.delbox'), 'cancel closes it');
+  ok(a.rows() === values.length, 'and deletes nothing');
+
+  a.card.shadowRoot.querySelector(`[data-del="${target[0]}"]`).onclick();
+  a.sent.length = 0;
+  a.card.shadowRoot.querySelector('#del-confirm').onclick();
+  await tick(); await tick(); await tick();
+  const dq = a.sent[0];
+  ok(dq && dq.service === 'game_night_query',
+     `the delete rides the existing query command, so nothing new to configure (${dq && dq.service})`);
+  ok(/^DELETE FROM "result" WHERE /.test(dq.service_data.q), `it is a DELETE (${dq.service_data.q})`);
+  ok(dq.service_data.q.includes(`time >= ${target[0]}s`) && dq.service_data.q.includes(`time <= ${target[0]}s`),
+     'bounded to the one timestamp, so it can never take the lot');
+  ok(/"game" = 'Mario Kart'/.test(dq.service_data.q) && /"mode" = 'free_for_all'/.test(dq.service_data.q),
+     'and narrowed by the tags');
+  ok(dq.service_data.pin === undefined, 'no PIN is sent in Home Assistant');
+  // …unless an InfluxDB that insists on POST is pointed at with a command of
+  // its own.
+  const ov = await makeCard({ allow_delete: true, tracking: { delete_service: 'rest_command.gn_del' } }, admin);
+  ov.card.shadowRoot.querySelector(`[data-del="${values[1][0]}"]`).onclick();
+  ov.sent.length = 0;
+  ov.card.shadowRoot.querySelector('#del-confirm').onclick();
+  await tick(); await tick();
+  ok(ov.sent[0] && ov.sent[0].service === 'gn_del', `delete_service overrides it (${ov.sent[0] && ov.sent[0].service})`);
+  ok(a.rows() === values.length - 1, 'the result is gone');
+  ok(!a.card.shadowRoot.querySelector('.delbox'), 'and the confirmation closed');
+  ok(a.card.shadowRoot.querySelectorAll('[data-del]').length === values.length - 1,
+     'the card re-read the history rather than trusting its own copy');
+
+  // The standalone board: no users, so a PIN the server checks.
+  const s = await makeCard({ allow_delete: true }, { adminPin: true });
+  ok(s.card.shadowRoot.querySelectorAll('[data-del]').length === values.length, 'the standalone board offers it too');
+  s.card.shadowRoot.querySelector(`[data-del="${target[0]}"]`).onclick();
+  ok(!!s.card.shadowRoot.querySelector('#del-pin'), 'and asks for a PIN');
+  s.sent.length = 0;
+  s.card.shadowRoot.querySelector('#del-confirm').onclick();
+  await tick();
+  ok(s.sent.length === 0 && /Enter the PIN/.test(s.card.shadowRoot.textContent),
+     'an empty PIN never reaches the server');
+  const field = s.card.shadowRoot.querySelector('#del-pin');
+  field.value = '2468'; field.oninput({ target: field });
+  s.card.shadowRoot.querySelector('#del-confirm').onclick();
+  await tick(); await tick(); await tick();
+  ok(s.sent[0] && s.sent[0].service_data.pin === '2468', 'the typed PIN is sent with the delete');
+  ok(s.rows() === values.length - 1, 'and the result goes');
+
+  // A server that refuses keeps the row and says why.
+  const r = await makeCard({ allow_delete: true }, { adminPin: true, __refuse: 'Wrong PIN.' });
+  r.card.shadowRoot.querySelector(`[data-del="${target[0]}"]`).onclick();
+  const rf = r.card.shadowRoot.querySelector('#del-pin');
+  rf.value = '1111'; rf.oninput({ target: rf });
+  r.card.shadowRoot.querySelector('#del-confirm').onclick();
+  await tick(); await tick();
+  ok(/Wrong PIN/.test(r.card.shadowRoot.textContent), 'a refusal is shown on the confirmation');
+  ok(!!r.card.shadowRoot.querySelector('.delbox'), 'which stays open to try again');
+  ok(r.rows() === values.length, 'and nothing was deleted');
+
+  // Deleting a live king-of-the-hill lineage says what it costs.
+  const k = await makeCard({ allow_delete: true }, admin);
+  const koth = values.find((v) => v[cols.indexOf('mode')] === 'king_of_the_hill');
+  k.card.shadowRoot.querySelector(`[data-del="${koth[0]}"]`).onclick();
+  ok(!/ongoing king-of-the-hill lineage/.test(k.card.shadowRoot.textContent),
+     'a one-off king of the hill carries no lineage warning');
+  const lineage = [...values[4]];
+  lineage[0] = at(thisYear, 7, 1); lineage[cols.indexOf('temp')] = null;
+  values.push(lineage);
+  const kl = await makeCard({ allow_delete: true }, admin);
+  kl.card.shadowRoot.querySelector(`[data-del="${lineage[0]}"]`).onclick();
+  ok(/ongoing king-of-the-hill lineage/.test(kl.card.shadowRoot.textContent),
+     'but an ongoing one warns that the reigning champion goes with it');
+  values.pop();
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

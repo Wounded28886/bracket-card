@@ -41,6 +41,8 @@ Nothing is built on the NAS — it pulls a ready-made image.
          - ./data:/data
        environment:
          TITLE: "Game Night"
+         # Only needed if you want to be able to delete a recorded result.
+         ADMIN_PIN: "4821"
    ```
 
 2. Click through; it downloads the image (about 60 MB) and starts in seconds.
@@ -64,7 +66,7 @@ and nothing to log in to.
 ```bash
 docker run -d --name bracket -p 8099:8099 \
   -v /volume1/docker/bracket/data:/data \
-  -e TITLE="Game Night" --restart unless-stopped \
+  -e TITLE="Game Night" -e ADMIN_PIN="4821" --restart unless-stopped \
   ghcr.io/wounded28886/bracket-board:latest
 ```
 
@@ -95,7 +97,23 @@ All optional, set as environment variables:
 | `TITLE` | `Game Night` | Heading on the page |
 | `BOARD` | `default` | Board used when the URL doesn't name one |
 | `POLL_MS` | `25000` | How long a sync request may wait before answering |
+| `ADMIN_PIN` | unset | PIN required to delete a recorded result. Unset means results can't be deleted. See below. |
 | `PUID` / `PGID` | `1000` | Run the server as this user instead. See below. |
+
+## Deleting a result
+
+Anyone who can reach the board can score a game on it, which is the point.
+Erasing the record of one is different, so it needs `ADMIN_PIN`.
+
+With it set, each row on the Hall of Fame's **History** tab gets a `✕`; it
+names the result, asks for the PIN, and removes that one point. The PIN is
+checked **here**, not in the page: it is never sent to the browser, a wrong
+guess is rejected without saying how close it was, and five misses lock
+deleting for a minute — enough to make a four-digit PIN not worth walking
+through. Every accepted delete is logged with its statement and the time.
+
+Leave `ADMIN_PIN` unset and nothing can be deleted, by the page or by anything
+else that finds `/api/query`. The start-up log says which way it is configured.
 
 ### Permissions on the data folder
 

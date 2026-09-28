@@ -1271,7 +1271,7 @@ function biggestWins(rows, { limit = 5 } = {}) {
  * the current champion, past winners and a leaderboard.
  */
 
-const CARD_VERSION = '1.7.3';
+const CARD_VERSION = '1.8.0';
 
 /* ---------- formats ---------- */
 // Mode is stored as a single character in the helper.
@@ -1486,6 +1486,11 @@ function finishingOrder(res) {
 const TRACKING_DEFAULTS = {
   write_service: 'rest_command.game_night_write',
   query_service: 'rest_command.game_night_query',
+  // Deleting goes through the read command by default: InfluxDB 1.x accepts a
+  // DELETE over the same GET /query endpoint (checked against 1.13.1), so the
+  // Home Assistant setup needs nothing added for it. Point delete_service at a
+  // POST command instead if your InfluxDB refuses.
+  delete_service: null,
   measurement: 'result',
 };
 
@@ -1502,6 +1507,8 @@ function trackingConfig(config) {
 // InfluxDB line-protocol escaping.
 const lpTag = (v) => String(v).replace(/[,= \\]/g, (c) => '\\' + c);
 const lpStr = (v) => '"' + String(v).replace(/[\\"]/g, (c) => '\\' + c) + '"';
+// A single-quoted InfluxQL literal, for the WHERE clause of a delete.
+const iqlStr = (v) => "'" + String(v).replace(/[\\']/g, (c) => '\\' + c) + "'";
 
 function resultLine(measurement, { game, mode, winner, runnerUp, players, created, standings, topWins, snapshot, sessions, games, temp, placings }) {
   const tags = `game=${lpTag(game || 'Untitled')},mode=${lpTag(MODES[mode].tag)}`;
@@ -2505,7 +2512,7 @@ const STYLE = `
   .pill.mode { font-weight:500; opacity:.85; }
   .lbl { display:block; font-size:.8rem; font-weight:600; margin: 8px 0 4px;
          color: var(--secondary-text-color); }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], input[type=password], select {
              width:100%; box-sizing:border-box; font: inherit; padding:10px;
              border:1px solid var(--divider-color, #e0e0e0); border-radius:8px;
              background: var(--card-background-color); color: var(--primary-text-color); }
@@ -2631,6 +2638,7 @@ const STYLE = `
  *   entity: input_text.game_night_bracket     # optional: refresh when it changes
  *   limit: 100                                # optional: rows to fetch
  *   game: Mario Kart                          # optional: preselect a game filter
+ *   allow_delete: true                        # optional: see _deleteMode below
  */
 class BracketHistoryCard extends HTMLElement {
   constructor() {
@@ -2646,6 +2654,33 @@ class BracketHistoryCard extends HTMLElement {
     this._sort = 'wins';
     this._player = null;      // when set, the card shows that player's page
     this._lastRaw = undefined;
+    this._pending = null;     // the row being deleted: { time, pin, error, busy }
+  }
+
+  /*
+   * Who is allowed to delete a result, and how they prove it.
+   *
+   * Nothing appears at all unless `allow_delete: true` is in the card's
+   * config, which only someone who can edit the dashboard can put there.
+   * Beyond that the two deployments are different places:
+   *
+   *  - Home Assistant knows who is looking, so the control is for admin
+   *    accounts only. A child's account never sees it, and can't be talked
+   *    into revealing it.
+   *  - The standalone board has no accounts — anyone who can reach the IP is
+   *    "logged in" — so it asks for a PIN that the *server* checks against
+   *    ADMIN_PIN. The card only collects it; it never learns whether it was
+   *    right, and a wrong guess is thrown away at the server.
+   *
+   * Unknown situations deny: no answer here means no delete button.
+   */
+  _deleteMode() {
+    if (!this._config || this._config.allow_delete !== true || !this._tracking) return null;
+    const hass = this._hass;
+    if (!hass) return null;
+    if (hass.adminPin) return 'pin';           // standalone, PIN configured
+    if (hass.user) return hass.user.is_admin ? 'admin' : null;
+    return null;
   }
 
   setConfig(config) {
@@ -2655,6 +2690,7 @@ class BracketHistoryCard extends HTMLElement {
     if (this._config.view) this._view = String(this._config.view);
     if (this._config.sort) this._sort = String(this._config.sort);
     this._rows = null;
+    this._pending = null;
     this._render();
   }
 
@@ -2729,6 +2765,25 @@ class BracketHistoryCard extends HTMLElement {
     root.querySelectorAll('[data-player]').forEach((el) => {
       el.onclick = () => { this._player = el.getAttribute('data-player'); this._render(); };
     });
+    // Deleting a result: open the confirmation, then act on it.
+    root.querySelectorAll('[data-del]').forEach((el) => {
+      el.onclick = () => {
+        this._pending = { time: Number(el.getAttribute('data-del')), pin: '', error: null, busy: false };
+        this._render();
+      };
+    });
+    const cancel = root.querySelector('#del-cancel');
+    if (cancel) cancel.onclick = () => { this._pending = null; this._render(); };
+    const confirm = root.querySelector('#del-confirm');
+    if (confirm) confirm.onclick = () => this._deleteRow();
+    const pin = root.querySelector('#del-pin');
+    if (pin) {
+      // Held on the pending record rather than re-rendering per keystroke,
+      // so the field keeps focus while it is typed into.
+      pin.oninput = (e) => { if (this._pending) this._pending.pin = e.target.value; };
+      pin.onkeydown = (e) => { if (e.key === 'Enter') this._deleteRow(); };
+      if (pin.focus) pin.focus();
+    }
   }
 
   /* ---- the views ---- */
@@ -2945,6 +3000,7 @@ class BracketHistoryCard extends HTMLElement {
       }
       return r.runner_up ? `<span class="muted"> beat ${esc(r.runner_up)}</span>` : '';
     };
+    const mode = this._deleteMode();
     return `
       <div class="pad">
         <table>
@@ -2956,10 +3012,82 @@ class BracketHistoryCard extends HTMLElement {
               <td><button class="linkish"><strong data-player="${esc(r.winner)}">${esc(r.winner)}</strong></button>${detail(r)}
                 ${r.placings ? `<div class="muted tiny">${esc(r.placings)}</div>`
                   : r.players ? `<div class="muted tiny">Players: ${esc(r.players)}</div>` : ''}
-                ${r.standings ? `<div class="muted tiny">${esc(r.standings)}</div>` : ''}</td>
+                ${r.standings ? `<div class="muted tiny">${esc(r.standings)}</div>` : ''}
+                ${mode ? this._deleteCell(r, mode) : ''}</td>
+              ${mode ? `<td class="delcol">${this._pending && this._pending.time === Number(r.time) ? ''
+                : `<button class="del" data-del="${Number(r.time)}" title="Delete this result">✕</button>`}</td>` : ''}
             </tr>`).join('')}
         </table>
       </div>`;
+  }
+
+  /*
+   * The confirmation, inline under the row it belongs to. Deliberately not a
+   * browser confirm(): this card lives on a wall tablet where a stray dialog
+   * is easy to dismiss by accident, and the PIN needs a field of its own.
+   */
+  _deleteCell(r, mode) {
+    const p = this._pending;
+    if (!p || p.time !== Number(r.time)) return '';
+    const lineage = r.mode === 'king_of_the_hill' && r.temp !== true;
+    return `
+      <div class="delbox">
+        <div>Delete <strong>${esc(r.winner)}</strong>'s win at
+          ${esc(r.game || 'Untitled')} on ${esc(fmtDate(r.time))}? This can't be undone.</div>
+        ${lineage ? `<div class="err tiny">This is the ongoing king-of-the-hill lineage for
+          ${esc(r.game || 'Untitled')} — deleting it loses the reigning champion and the run of
+          defences with it.</div>` : ''}
+        ${mode === 'pin' ? `<input id="del-pin" type="password" inputmode="numeric"
+          autocomplete="off" placeholder="PIN" value="${esc(p.pin || '')}">` : ''}
+        ${p.error ? `<div class="err tiny">${esc(p.error)}</div>` : ''}
+        <div class="delact">
+          <button class="danger" id="del-confirm" ${p.busy ? 'disabled' : ''}>${p.busy ? 'Deleting…' : 'Delete'}</button>
+          <button class="ghost" id="del-cancel" ${p.busy ? 'disabled' : ''}>Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  /*
+   * Remove one recorded result. The point is addressed by its timestamp —
+   * which is the tournament's creation time, so it is unique per result —
+   * and narrowed by both tags, so even a mangled clause can only ever match
+   * the one row rather than taking out the lot.
+   */
+  async _deleteRow() {
+    const p = this._pending;
+    if (!p || p.busy) return;
+    const mode = this._deleteMode();
+    if (!mode) { this._pending = null; return this._render(); }
+    const row = (this._rows || []).find((r) => Number(r.time) === p.time);
+    if (!row) { this._pending = null; return this._render(); }
+    if (mode === 'pin' && !String(p.pin || '').trim()) {
+      p.error = 'Enter the PIN.';
+      return this._render();
+    }
+
+    p.busy = true; p.error = null;
+    this._render();
+    const t = Math.floor(Number(row.time));
+    const where = [`time >= ${t}s`, `time <= ${t}s`, `"game" = ${iqlStr(row.game || 'Untitled')}`];
+    if (row.mode) where.push(`"mode" = ${iqlStr(row.mode)}`);
+    const q = `DELETE FROM "${this._tracking.measurement}" WHERE ${where.join(' AND ')}`;
+    const service = this._tracking.delete_service || this._tracking.query_service;
+    try {
+      const data = { q };
+      if (mode === 'pin') data.pin = String(p.pin || '');
+      const r = await callWithResponse(this._hass, service, data);
+      // A DELETE returns an empty envelope; anything with an error in it
+      // means InfluxDB refused, and the row is still there.
+      const body = r && r.content != null ? r.content : r;
+      parseInfluxRows(typeof body === 'string' && body.trim() ? body : (body || { results: [] }));
+      this._pending = null;
+      this._rows = null;
+      await this._load();
+    } catch (e) {
+      p.busy = false;
+      p.error = (e && (e.message || e.error)) || String(e);
+      this._render();
+    }
   }
 
   /* ---- one player ---- */
@@ -3045,6 +3173,19 @@ const HISTORY_STYLE = `
   .row-between { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
   .linkish { font: inherit; background:none; border:none; padding:0; cursor:pointer;
              color: var(--primary-color); text-align:left; }
+  /* deleting a result: quiet until you reach for it */
+  .delcol { width: 1%; vertical-align: top; text-align: right; }
+  .del { font: inherit; font-size:.9rem; line-height:1; cursor:pointer; padding: 4px 7px;
+         border-radius: 8px; border: 1px solid transparent; background: transparent;
+         color: var(--disabled-text-color, #bdbdbd); }
+  .del:hover, .del:focus-visible { color: var(--error-color, #db4437);
+         border-color: var(--divider-color, #e0e0e0); }
+  .delbox { margin: 8px 0 4px; padding: 10px 12px; border-radius: 10px;
+            border: 1px solid var(--error-color, #db4437);
+            background: var(--secondary-background-color); font-size:.88rem; }
+  .delbox input { margin-top: 8px; width: 120px; }
+  .delact { display:flex; gap:8px; margin-top: 10px; }
+  .delact .ghost { margin-left: 0; }
   .linkish:hover { text-decoration: underline; }
   .who { font-size: 1.05rem; font-weight: 600; }
   /* belts */

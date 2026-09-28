@@ -9,6 +9,7 @@
 const ENTITY = 'input_text.bracket';
 const WRITE = 'game_night_write';
 const QUERY = 'game_night_query';
+const DELETE = 'game_night_delete';
 
 const qs = new URLSearchParams(location.search);
 let config = { title: 'Game Night', board: 'default', poll_ms: 25000 };
@@ -29,6 +30,10 @@ const boardParam = () => `board=${encodeURIComponent(config.board)}`;
 function hass() {
   return {
     states: { [ENTITY]: { state: value, attributes: {}, entity_id: ENTITY } },
+    // There are no users here, so the history card's delete control leans on
+    // the PIN instead. The server decides whether a given PIN is right; this
+    // only says that it will be asked for.
+    adminPin: config.delete === 'pin',
     // Fire-and-forget, like Home Assistant's own callService. The card
     // renders optimistically and the poll confirms it.
     callService(domain, service, data) {
@@ -51,11 +56,13 @@ function hass() {
         });
         return { response: { status: 204, content: '' } };
       }
-      if (service === QUERY) {
+      // Reads and deletes take the same endpoint here; the server tells them
+      // apart by the statement and asks the delete for a PIN.
+      if (service === QUERY || service === DELETE) {
         const body = await api('/api/query', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ q: data.q }),
+          body: JSON.stringify(data.pin ? { q: data.q, pin: data.pin } : { q: data.q }),
         });
         return { response: { status: 200, content: body } };
       }
@@ -125,7 +132,10 @@ async function main() {
   const bracket = document.createElement('bracket-card');
   bracket.setConfig({ entity: ENTITY, title: config.title, tracking: true });
   const history = document.createElement('bracket-history-card');
-  history.setConfig({ title: 'Hall of Fame', entity: ENTITY, tracking: true });
+  history.setConfig({
+    title: 'Hall of Fame', entity: ENTITY, tracking: true,
+    allow_delete: config.delete === 'pin',
+  });
   cards = [bracket, history];
 
   const root = document.getElementById('cards');

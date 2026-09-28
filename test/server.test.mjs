@@ -217,6 +217,18 @@ section('http api');
   ok((await send('/api/query', { q: 'DROP DATABASE x' })).status === 400, 'a bad query is a 400');
   ok((await send('/api/write', { line: 'rubbish' })).status === 400, 'a bad line is a 400');
 
+  // With no ADMIN_PIN set, nothing can be deleted — not by the page, and not
+  // by anyone who found the API.
+  ok((await get('/api/config')).body.delete === 'off', 'config says deleting is off');
+  const noPin = await send('/api/query', { q: 'DELETE FROM "result"' });
+  ok(noPin.status === 403 && /ADMIN_PIN/.test(noPin.body.error), `a delete is refused (${noPin.status})`);
+  ok((await get(`/api/query?q=${encodeURIComponent('DELETE FROM "result"')}`)).status === 403,
+     'and refused over GET too, where a PIN could not be carried');
+  ok((await send('/api/query', { q: '  delete from "result"' })).status === 403,
+     'lower case and leading space do not slip past');
+  ok((await send('/api/query', { q: 'SELECT "winner" FROM "result"' })).body.results[0].series[0].values.length === 1,
+     'and the result is still there');
+
   // Static files, including the card bundle from dist/.
   const page = await fetch(base + '/');
   const html = await page.text();
@@ -228,6 +240,62 @@ section('http api');
   ok((await fetch(base + '/api/nope')).status === 404, '404 for unknown paths');
   const escape = await fetch(base + '/../package.json');
   ok(escape.status === 404 || escape.status === 400, 'no climbing out of the static root');
+
+  store.flush();
+  await new Promise((r) => server.close(r));
+}
+
+// ---- deleting a result, with ADMIN_PIN set ----
+section('admin pin');
+{
+  // A second instance of the module, so it reads the environment again.
+  process.env.DATA_DIR = tmp();
+  process.env.PORT = '0';
+  process.env.ADMIN_PIN = '2468';
+  const { server, store } = await import('../server/server.mjs?admin');
+  await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const get = (p) => fetch(base + p).then(async (r) => ({ status: r.status, body: await r.json() }));
+  const send = (p, body) => fetch(base + p, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  const rows = async () => {
+    const r = await send('/api/query', { q: 'SELECT "winner", "game" FROM "result" ORDER BY time DESC LIMIT 20' });
+    return (((r.body.results[0] || {}).series || [{}])[0] || {}).values || [];
+  };
+
+  ok((await get('/api/config')).body.delete === 'pin', 'config tells the page to ask for a PIN');
+
+  await send('/api/write', { line: LINE });
+  await send('/api/write', { line: 'result,game=Darts,mode=round_robin winner="Mum" 1789000100' });
+  ok((await rows()).length === 2, 'two results recorded');
+
+  // The exact statement the card builds.
+  const del = 'DELETE FROM "result" WHERE time >= 1789000000s AND time <= 1789000000s'
+    + ` AND "game" = 'Mario Kart' AND "mode" = 'king_of_the_hill'`;
+
+  const wrong = await send('/api/query', { q: del, pin: '1111' });
+  ok(wrong.status === 403 && /Wrong PIN/.test(wrong.body.error), `a wrong PIN is refused (${wrong.status})`);
+  ok((await send('/api/query', { q: del })).status === 403, 'a missing PIN is refused');
+  ok((await send('/api/query', { q: del, pin: '2468x' })).status === 403, 'so is a PIN with the right prefix');
+  ok((await rows()).length === 2, 'and nothing has been deleted');
+
+  const right = await send('/api/query', { q: del, pin: '2468' });
+  ok(right.status === 200, `the right PIN goes through (${right.status})`);
+  const left = await rows();
+  // columns are [time, winner, game]
+  ok(left.length === 1 && left[0][2] === 'Darts', `only the named result went (${JSON.stringify(left)})`);
+
+  // Five wrong guesses shut the door, so a four-digit PIN can't be walked.
+  for (let i = 0; i < 4; i++) await send('/api/query', { q: del, pin: '0000' });
+  const locked = await send('/api/query', { q: del, pin: '0000' });
+  ok(locked.status === 403 && /Too many wrong PINs/.test(locked.body.error),
+     `the fifth miss locks deleting (${locked.body.error})`);
+  const stillLocked = await send('/api/query', { q: del, pin: '2468' });
+  ok(stillLocked.status === 403 && /Too many wrong PINs/.test(stillLocked.body.error),
+     'and the right PIN is refused while the lock holds');
+  ok((await send('/api/query', { q: 'SELECT "winner" FROM "result"' })).status === 200,
+     'reading is never locked out');
 
   store.flush();
   await new Promise((r) => server.close(r));
