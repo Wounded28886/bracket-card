@@ -369,12 +369,27 @@ async function playOut(card, hassFor) {
   // Nothing at all unless the dashboard config asks for it.
   const offCard = await makeCard({}, admin);
   ok(!offCard.card.shadowRoot.querySelector('[data-del]'), 'no delete control without allow_delete');
-  // …and, with it, still nothing for a child's account.
+  ok(!/allow_delete/.test(offCard.card.shadowRoot.textContent),
+     'and no explanation either, since nothing was asked for');
+  // …and, with it, still nothing for a child's account — but the card says so,
+  // rather than leaving an adult hunting through YAML that was already right.
   const kidCard = await makeCard({ allow_delete: true }, kid);
   ok(!kidCard.card.shadowRoot.querySelector('[data-del]'), 'a non-admin user never sees the delete control');
+  const kidNote = kidCard.card.shadowRoot.textContent.replace(/\s+/g, ' ');
+  ok(/limited to Home Assistant admin accounts/.test(kidNote) && /Atlas/.test(kidNote),
+     'and the card explains which gate refused, and who it thinks you are');
   // …nor when the card cannot tell who is looking.
   const anonCard = await makeCard({ allow_delete: true }, {});
   ok(!anonCard.card.shadowRoot.querySelector('[data-del]'), 'an unknown user is denied, not allowed');
+  ok(/can't tell who is signed in/.test(anonCard.card.shadowRoot.textContent.replace(/\s+/g, ' ')),
+     'and says that too');
+  // allow_delete with tracking off needs no explanation of its own: the card
+  // already says tracking is disabled instead of showing any history.
+  const untracked = document.createElement('bracket-history-card');
+  untracked.setConfig({ allow_delete: true, tracking: false });
+  untracked.hass = { states: {}, ...admin };
+  await tick();
+  ok(/Tracking is disabled/.test(untracked.shadowRoot.textContent), 'tracking off says so first');
 
   // An admin in Home Assistant: a control per row, a confirmation, no PIN.
   const a = await makeCard({ allow_delete: true }, admin);

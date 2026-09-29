@@ -44,7 +44,7 @@ import {
   biggestWins, ELO_START,
 } from './stats.js';
 
-const CARD_VERSION = '1.8.0';
+const CARD_VERSION = '1.8.1';
 
 /* ---------- formats ---------- */
 // Mode is stored as a single character in the helper.
@@ -1788,10 +1788,29 @@ class BracketHistoryCard extends HTMLElement {
                 ${r.standings ? `<div class="muted tiny">${esc(r.standings)}</div>` : ''}
                 ${mode ? this._deleteCell(r, mode) : ''}</td>
               ${mode ? `<td class="delcol">${this._pending && this._pending.time === Number(r.time) ? ''
-                : `<button class="del" data-del="${Number(r.time)}" title="Delete this result">✕</button>`}</td>` : ''}
+                : `<button class="del" data-del="${Number(r.time)}" title="Delete this result">Delete</button>`}</td>` : ''}
             </tr>`).join('')}
         </table>
+        ${mode ? '' : this._deleteNote()}
       </div>`;
+  }
+
+  /*
+   * When the config asks for the delete control and it still isn't there,
+   * say why. Silence is the worst answer: it looks identical to the option
+   * not working, and sends you hunting through YAML that was already right.
+   */
+  _deleteNote() {
+    // Tracking being off needs no note: the card says so instead of the
+    // history, and never gets this far.
+    if (!this._config || this._config.allow_delete !== true) return '';
+    const hass = this._hass;
+    if (hass && hass.user && hass.user.is_admin === false) {
+      return `<p class="muted tiny">allow_delete is set, but deleting a result is limited to Home
+        Assistant admin accounts. You are signed in as ${esc(hass.user.name || 'a non-admin user')}.</p>`;
+    }
+    return `<p class="muted tiny">allow_delete is set, but this card can't tell who is signed in,
+      so it won't offer to delete anything. On the standalone board, set ADMIN_PIN on the container.</p>`;
   }
 
   /*
@@ -1946,13 +1965,13 @@ const HISTORY_STYLE = `
   .row-between { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
   .linkish { font: inherit; background:none; border:none; padding:0; cursor:pointer;
              color: var(--primary-color); text-align:left; }
-  /* deleting a result: quiet until you reach for it */
+  /* deleting a result: plainly there, without shouting */
   .delcol { width: 1%; vertical-align: top; text-align: right; }
-  .del { font: inherit; font-size:.9rem; line-height:1; cursor:pointer; padding: 4px 7px;
-         border-radius: 8px; border: 1px solid transparent; background: transparent;
-         color: var(--disabled-text-color, #bdbdbd); }
+  .del { font: inherit; font-size:.72rem; line-height:1; cursor:pointer; padding: 5px 10px;
+         border-radius: 999px; border: 1px solid var(--divider-color, #e0e0e0);
+         background: transparent; color: var(--secondary-text-color); }
   .del:hover, .del:focus-visible { color: var(--error-color, #db4437);
-         border-color: var(--divider-color, #e0e0e0); }
+         border-color: var(--error-color, #db4437); }
   .delbox { margin: 8px 0 4px; padding: 10px 12px; border-radius: 10px;
             border: 1px solid var(--error-color, #db4437);
             background: var(--secondary-background-color); font-size:.88rem; }
