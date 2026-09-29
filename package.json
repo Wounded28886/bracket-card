@@ -1,6 +1,6 @@
 {
   "name": "ha-bracket-card",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "Game-night tournament cards for Home Assistant (HACS) and a standalone Docker server.",
   "type": "module",
   "scripts": {

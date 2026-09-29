@@ -160,6 +160,34 @@ section('head to head');
   assert(h.meetings('Dad', 'Mum') === 3, `meetings are the sum (${h.meetings('Dad', 'Mum')})`);
   assert(h.wins('Dad', 'Phoenix') === 0, 'never met is zero');
 
+  // A free-for-all has no final: winning it beats everyone who played, once
+  // each, however many rounds it ran to.
+  assert(h.wins('Atlas', 'Miles') === 1 && h.wins('Atlas', 'Dad') === 1 && h.wins('Atlas', 'Mum') === 1,
+    `the free-for-all winner beat the whole field (Miles ${h.wins('Atlas', 'Miles')}, `
+    + `Dad ${h.wins('Atlas', 'Dad')}, Mum ${h.wins('Atlas', 'Mum')})`);
+  assert(h.wins('Miles', 'Atlas') === 0, 'and the ones who lost it gain nothing from it');
+
+  // Every other format still counts the final only, runner-up included.
+  const koth = ROWS.find((r) => r.mode === 'king_of_the_hill' && !r.temp);
+  assert(h.wins('Mum', 'Dad') === 2 && h.wins('Mum', 'Atlas') === 0,
+    `king of the hill counts its runner-up and no one else (Dad ${h.wins('Mum', 'Dad')}, `
+    + `Atlas ${h.wins('Mum', 'Atlas')}, of ${koth.players})`);
+
+  // One free-for-all, one win apiece — not one per round.
+  const tenRounds = [{ time: at(2026, 9, 28), game: 'Smash', mode: 'free_for_all',
+    winner: 'Miles', runner_up: 'Atlas', players: 'Miles, Atlas, Phoenix, Dad',
+    player_count: 4, placings: 'Miles, Atlas, Phoenix, Dad' }];
+  const ten = headToHead(tenRounds);
+  assert(ten.wins('Miles', 'Atlas') === 1 && ten.wins('Miles', 'Phoenix') === 1
+    && ten.wins('Miles', 'Dad') === 1 && ten.wins('Miles', 'Miles') === 0,
+    'a ten-round free-for-all is still 1-0 against each of the other three');
+  // Second place beat nobody: only winning the match counts.
+  assert(ten.wins('Atlas', 'Phoenix') === 0 && ten.wins('Atlas', 'Dad') === 0
+    && ten.wins('Phoenix', 'Dad') === 0,
+    'finishing above someone in a free-for-all is not itself a win over them');
+  assert(ten.meetings('Miles', 'Dad') === 1 && ten.meetings('Atlas', 'Dad') === 0,
+    'so the only meetings it creates are with the winner');
+
   const r = rivalries(ROWS);
   assert(r.length >= 1 && r[0].meetings === 3, `most-met pair first (${JSON.stringify(r[0])})`);
   assert(r[0].leader === 'Mum', `the pair's leader (${r[0].leader})`);

@@ -1152,16 +1152,35 @@ function seasons(rows) {
  * Who has beaten whom in a final. Only the top two of an event are a real
  * meeting — everyone else may never have played each other.
  */
+/*
+ * Who has beaten whom, counted differently depending on how the game was won.
+ *
+ * Everything with a final — the brackets, round robin, Swiss, king of the
+ * hill — pits two people against each other at the end, so one result is one
+ * win over the runner-up and nobody else is involved.
+ *
+ * A free-for-all has no final. Everyone plays every round together and the
+ * most points takes it, so winning it is a win over each of the other players
+ * at once: four players, three results. Not one per round — the match is the
+ * unit, however many rounds it took.
+ */
 function headToHead(rows) {
   const names = new Set();
   const pairs = new Map();
   const key = (a, b) => `${a}\u0000${b}`;
+  const beat = (a, b) => {
+    if (!a || !b || a === b) return;
+    names.add(a); names.add(b);
+    pairs.set(key(a, b), (pairs.get(key(a, b)) || 0) + 1);
+  };
 
   for (const row of realRows(rows)) {
-    if (!row.winner || !row.runner_up) continue;
-    names.add(row.winner);
-    names.add(row.runner_up);
-    pairs.set(key(row.winner, row.runner_up), (pairs.get(key(row.winner, row.runner_up)) || 0) + 1);
+    if (!row.winner) continue;
+    if (row.mode === 'free_for_all') {
+      for (const name of splitNames(row.players)) beat(row.winner, name);
+    } else if (row.runner_up) {
+      beat(row.winner, row.runner_up);
+    }
   }
   const list = [...names].sort((a, b) => a.localeCompare(b));
   return {
@@ -1271,7 +1290,7 @@ function biggestWins(rows, { limit = 5 } = {}) {
  * the current champion, past winners and a leaderboard.
  */
 
-const CARD_VERSION = '1.8.1';
+const CARD_VERSION = '1.9.0';
 
 /* ---------- formats ---------- */
 // Mode is stored as a single character in the helper.
@@ -1510,7 +1529,7 @@ const lpStr = (v) => '"' + String(v).replace(/[\\"]/g, (c) => '\\' + c) + '"';
 // A single-quoted InfluxQL literal, for the WHERE clause of a delete.
 const iqlStr = (v) => "'" + String(v).replace(/[\\']/g, (c) => '\\' + c) + "'";
 
-function resultLine(measurement, { game, mode, winner, runnerUp, players, created, standings, topWins, snapshot, sessions, games, temp, placings }) {
+function resultLine(measurement, { game, mode, winner, runnerUp, players, created, standings, topWins, snapshot, sessions, games, temp, placings, replay }) {
   const tags = `game=${lpTag(game || 'Untitled')},mode=${lpTag(MODES[mode].tag)}`;
   const fields = [
     `winner=${lpStr(winner)}`,
@@ -1519,6 +1538,12 @@ function resultLine(measurement, { game, mode, winner, runnerUp, players, create
     `player_count=${players.length}i`,
   ];
   if (standings) fields.push(`standings=${lpStr(standings)}`);
+  // The board exactly as it finished. It is the same string the helper holds,
+  // so feeding it back through decodeState + compute replays every round or
+  // match — which is what the history's expanded row shows. A couple of
+  // hundred characters at most; InfluxDB has none of the helper's 255-char
+  // limit, so there is no reason not to keep it.
+  if (replay) fields.push(`replay=${lpStr(replay)}`);
   // The full finishing order, so a season table can award points by placing.
   if (placings && placings.length) fields.push(`placings=${lpStr(placings.join(', '))}`);
   if (Number.isInteger(topWins)) fields.push(`top_wins=${topWins}i`);
@@ -1607,6 +1632,84 @@ function ordinal(n) {
   const r = n % 100;
   if (r >= 11 && r <= 13) return n + 'th';
   return n + (['th', 'st', 'nd', 'rd'][n % 10] || 'th');
+}
+
+/* ---------- replaying a recorded result ---------- */
+/*
+ * Turn a finished tournament back into the list of things that happened in
+ * it: the rounds of a free-for-all, the matches of a bracket or a schedule,
+ * the challenges of a king of the hill.
+ *
+ * Takes whatever `compute` returns, so the history's expanded row is showing
+ * the same engine output the live board draws — not a second, drifting
+ * interpretation of the stored codes.
+ *
+ * Returns [{ label, detail }], or [] when there is nothing decided to show.
+ */
+function playLines(res) {
+  if (!res) return [];
+  const out = [];
+  const name = (i) => (res.players && res.players[i] != null ? res.players[i] : '?');
+
+  if (res.kind === 'ffa') {
+    for (const round of res.rounds || []) {
+      out.push({
+        label: `Round ${round.n}`,
+        detail: round.order.map((idx, place) => `${place + 1}. ${name(idx)}`).join('   '),
+      });
+    }
+    return out;
+  }
+
+  if (res.kind === 'rr' || res.kind === 'swiss') {
+    for (const round of res.rounds || []) {
+      for (const m of round.matches || []) {
+        if (m.winner === 'bye') { out.push({ label: `Round ${m.round}`, detail: `${name(m.p1)} — bye` }); continue; }
+        if (!m.winner) continue;
+        const won = m.winner === 'p1' ? m.p1 : m.p2;
+        const lost = m.winner === 'p1' ? m.p2 : m.p1;
+        out.push({ label: `Round ${m.round}`, detail: `${name(won)} beat ${name(lost)}` });
+      }
+    }
+    // A tie at the top is settled by a small knockout between the tied names.
+    if (res.decider) out.push(...playLines({ kind: 'bracket', state: res.decider })
+      .map((l) => ({ label: 'Decider', detail: l.detail })));
+    return out;
+  }
+
+  if (res.kind === 'koth') {
+    for (const g of res.games || []) {
+      const held = g.winner === 'king';
+      const won = held ? g.king : g.challenger;
+      const lost = held ? g.challenger : g.king;
+      out.push({
+        label: `Game ${g.n}`,
+        detail: `${name(won)} beat ${name(lost)}`
+          + (g.crowning ? ' — crowned' : held ? ' — held the hill' : ' — took the hill'),
+      });
+    }
+    return out;
+  }
+
+  if (res.kind === 'bracket' && res.state) {
+    const state = res.state;
+    const where = { W: 'Winners', L: 'Losers', GF: 'Grand final' };
+    for (const id of state.order) {
+      const m = state.matches[id];
+      if (!m || !m.winner || m.winner === 'bye') continue;
+      const won = m.winner === 'p1' ? m.p1 : m.p2;
+      const lost = m.winner === 'p1' ? m.p2 : m.p1;
+      if (isBye(won) || isBye(lost)) continue;      // a walkover isn't a result
+      out.push({
+        label: m.bracket === 'GF' ? (m.round === 2 ? 'Reset game' : where.GF)
+          : `${where[m.bracket] || m.bracket} R${m.round}`,
+        detail: `${slotLabel(won)} beat ${slotLabel(lost)}`,
+      });
+    }
+    // Round robin and Swiss can end in a decider, which is a small bracket.
+    return out;
+  }
+  return out;
 }
 
 /* ---------- the card ---------- */
@@ -1874,6 +1977,7 @@ class BracketCard extends HTMLElement {
       players: d.players, created: d.created || Math.floor(Date.now() / 1000),
       standings: standingsSummary(res), topWins: koth ? res.kingWins : undefined,
       placings: finishingOrder(res),
+      replay: encodeState(d),
       snapshot: koth && !d.temp ? kothSnapshot(res) : null, sessions: res.sessions,
       games: res.totalGames, temp: koth && d.temp,
     });
@@ -2655,6 +2759,7 @@ class BracketHistoryCard extends HTMLElement {
     this._player = null;      // when set, the card shows that player's page
     this._lastRaw = undefined;
     this._pending = null;     // the row being deleted: { time, pin, error, busy }
+    this._openRow = null;     // the history row showing its play-by-play
   }
 
   /*
@@ -2713,7 +2818,7 @@ class BracketHistoryCard extends HTMLElement {
     this._busy = true; this._error = null;
     this._render();
     const limit = Math.max(1, Math.min(1000, Number(this._config.limit) || 100));
-    const q = `SELECT "winner", "runner_up", "players", "player_count", "placings", "standings", "top_wins", "games", "sessions", "last_played", "temp", "game", "mode" FROM "${this._tracking.measurement}" ORDER BY time DESC LIMIT ${limit}`;
+    const q = `SELECT "winner", "runner_up", "players", "player_count", "placings", "standings", "top_wins", "games", "sessions", "last_played", "temp", "replay", "game", "mode" FROM "${this._tracking.measurement}" ORDER BY time DESC LIMIT ${limit}`;
     try {
       const r = await callWithResponse(this._hass, this._tracking.query_service, { q });
       this._rows = parseInfluxRows(r && r.content != null ? r.content : r);
@@ -2764,6 +2869,14 @@ class BracketHistoryCard extends HTMLElement {
     // Any name anywhere opens that player's page.
     root.querySelectorAll('[data-player]').forEach((el) => {
       el.onclick = () => { this._player = el.getAttribute('data-player'); this._render(); };
+    });
+    // One expanded play-by-play at a time, so the list stays readable.
+    root.querySelectorAll('[data-replay]').forEach((el) => {
+      el.onclick = () => {
+        const t = Number(el.getAttribute('data-replay'));
+        this._openRow = this._openRow === t ? null : t;
+        this._render();
+      };
     });
     // Deleting a result: open the confirmation, then act on it.
     root.querySelectorAll('[data-del]').forEach((el) => {
@@ -2948,11 +3061,13 @@ class BracketHistoryCard extends HTMLElement {
     const h = headToHead(rows);
     const rivals = rivalries(rows, { min: 1 });
     if (!h.players.length) {
-      return `<div class="pad muted">No finals with a named runner-up yet — this fills in as tournaments finish.</div>`;
+      return `<div class="pad muted">Nothing decided yet — this fills in as tournaments finish.</div>`;
     }
     const grid = `
       <div class="pad">
-        <div class="sub">Finals won against</div>
+        <div class="sub">Wins against</div>
+        <div class="muted tiny">Winning a free-for-all counts as a win over everyone who played it.
+          Every other format counts the final, so only the runner-up.</div>
         <div class="scroll tight">
           <table class="matrix">
             <tr class="th"><td></td>${h.players.map((p) => `<td class="num">${esc(p)}</td>`).join('')}</tr>
@@ -2998,7 +3113,13 @@ class BracketHistoryCard extends HTMLElement {
         if (Number.isFinite(r.sessions) && r.sessions > 1) bits.push(`${r.sessions} sessions`);
         return `<span class="muted"> — 👑 ${bits.join(' · ') || 'king of the hill'}</span>`;
       }
-      return r.runner_up ? `<span class="muted"> beat ${esc(r.runner_up)}</span>` : '';
+      // "beat X" is only true where there was a final. A free-for-all is
+      // decided on points across the whole field, so name the runner-up as
+      // what they are rather than as someone who lost a match.
+      if (!r.runner_up) return '';
+      return r.mode === 'free_for_all'
+        ? `<span class="muted"> won it — ${esc(r.runner_up)} 2nd</span>`
+        : `<span class="muted"> beat ${esc(r.runner_up)}</span>`;
     };
     const mode = this._deleteMode();
     return `
@@ -3013,6 +3134,7 @@ class BracketHistoryCard extends HTMLElement {
                 ${r.placings ? `<div class="muted tiny">${esc(r.placings)}</div>`
                   : r.players ? `<div class="muted tiny">Players: ${esc(r.players)}</div>` : ''}
                 ${r.standings ? `<div class="muted tiny">${esc(r.standings)}</div>` : ''}
+                ${this._replayCell(r)}
                 ${mode ? this._deleteCell(r, mode) : ''}</td>
               ${mode ? `<td class="delcol">${this._pending && this._pending.time === Number(r.time) ? ''
                 : `<button class="del" data-del="${Number(r.time)}" title="Delete this result">Delete</button>`}</td>` : ''}
@@ -3038,6 +3160,32 @@ class BracketHistoryCard extends HTMLElement {
     }
     return `<p class="muted tiny">allow_delete is set, but this card can't tell who is signed in,
       so it won't offer to delete anything. On the standalone board, set ADMIN_PIN on the container.</p>`;
+  }
+
+  /*
+   * How a result was actually arrived at, under the row that summarises it.
+   *
+   * Only rows recorded with the board attached can offer this: results from
+   * before it was stored have nothing to replay, and rather than show an
+   * empty drawer they simply don't offer one.
+   */
+  _replayCell(r) {
+    if (!r.replay) return '';
+    const open = this._openRow === Number(r.time);
+    const toggle = `<button class="linkish tiny" data-replay="${Number(r.time)}">${
+      open ? '▾ Hide how it was won' : '▸ Show how it was won'}</button>`;
+    if (!open) return `<div class="replaytoggle">${toggle}</div>`;
+
+    const d = decodeState(r.replay);
+    const lines = d ? playLines(compute(d, this._config)) : null;
+    let body;
+    if (!lines) body = `<div class="muted tiny">That result's board couldn't be read.</div>`;
+    else if (!lines.length) body = `<div class="muted tiny">Nothing was recorded against this one.</div>`;
+    else {
+      body = `<table class="plays">${lines.map((l) => `
+        <tr><td class="muted nowrap">${esc(l.label)}</td><td>${esc(l.detail)}</td></tr>`).join('')}</table>`;
+    }
+    return `<div class="replaytoggle">${toggle}</div><div class="replay">${body}</div>`;
   }
 
   /*
@@ -3192,6 +3340,15 @@ const HISTORY_STYLE = `
   .row-between { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
   .linkish { font: inherit; background:none; border:none; padding:0; cursor:pointer;
              color: var(--primary-color); text-align:left; }
+  /* the play-by-play behind a result */
+  .replaytoggle { margin-top: 4px; }
+  .replaytoggle .linkish { font-size: .75rem; }
+  .replay { margin: 6px 0 2px; padding: 8px 10px; border-radius: 10px;
+            background: var(--secondary-background-color); }
+  table.plays { width: auto; }
+  table.plays td { padding: 2px 10px 2px 0; font-size: .82rem; border: none; vertical-align: top; }
+  table.plays td:first-child { font-size: .72rem; text-transform: uppercase;
+            letter-spacing: .04em; padding-top: 4px; }
   /* deleting a result: plainly there, without shouting */
   .delcol { width: 1%; vertical-align: top; text-align: right; }
   .del { font: inherit; font-size:.72rem; line-height:1; cursor:pointer; padding: 5px 10px;

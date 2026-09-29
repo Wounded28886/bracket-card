@@ -313,16 +313,35 @@ export function seasons(rows) {
  * Who has beaten whom in a final. Only the top two of an event are a real
  * meeting — everyone else may never have played each other.
  */
+/*
+ * Who has beaten whom, counted differently depending on how the game was won.
+ *
+ * Everything with a final — the brackets, round robin, Swiss, king of the
+ * hill — pits two people against each other at the end, so one result is one
+ * win over the runner-up and nobody else is involved.
+ *
+ * A free-for-all has no final. Everyone plays every round together and the
+ * most points takes it, so winning it is a win over each of the other players
+ * at once: four players, three results. Not one per round — the match is the
+ * unit, however many rounds it took.
+ */
 export function headToHead(rows) {
   const names = new Set();
   const pairs = new Map();
   const key = (a, b) => `${a}\u0000${b}`;
+  const beat = (a, b) => {
+    if (!a || !b || a === b) return;
+    names.add(a); names.add(b);
+    pairs.set(key(a, b), (pairs.get(key(a, b)) || 0) + 1);
+  };
 
   for (const row of realRows(rows)) {
-    if (!row.winner || !row.runner_up) continue;
-    names.add(row.winner);
-    names.add(row.runner_up);
-    pairs.set(key(row.winner, row.runner_up), (pairs.get(key(row.winner, row.runner_up)) || 0) + 1);
+    if (!row.winner) continue;
+    if (row.mode === 'free_for_all') {
+      for (const name of splitNames(row.players)) beat(row.winner, name);
+    } else if (row.runner_up) {
+      beat(row.winner, row.runner_up);
+    }
   }
   const list = [...names].sort((a, b) => a.localeCompare(b));
   return {

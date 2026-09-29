@@ -289,11 +289,25 @@ doesn't sit on top of this year's board for ever. Below it, a breakdown **by
 format** (who wins knockouts, who wins points races) and the **biggest
 fields** anyone has won.
 
-**Head to head.** A grid of who has beaten whom in a final, green where
-you're ahead and red where you're behind, plus a **rivalries** list ordered by
-how often each pair has met.
+**Head to head.** A grid of who has beaten whom, green where you're ahead and
+red where you're behind, plus a **rivalries** list ordered by how often each
+pair has met.
 
-**History.** Every result, newest first, with the full finishing order.
+How a win is counted depends on how it was won:
+
+- A **free-for-all** has no final. Everyone plays every round together and the
+  most points takes it, so winning one is a win over *each* of the other
+  players — four players, three results. It counts once for the match, not
+  once per round, and finishing second beats nobody.
+- **Every other format** ends in a final between two people, so a result is
+  one win over the runner-up and no one else.
+
+**History.** Every result, newest first, with the full finishing order — and
+**"Show how it was won"**, which expands the row into what actually happened:
+each round's finishing order in a free-for-all, each match in a bracket or a
+schedule, each challenge in a king of the hill. The board is stored with the
+result, so this is the same engine the live card draws, replayed. Results
+recorded before v1.9.0 have no board stored and so don't offer it.
 
 **A player's page** collects it all for one person: wins and win rate, points,
 rating, best field, form and streak, their record **by game** and **by
@@ -330,6 +344,7 @@ Measurement `result` (configurable) with:
 | field | `player_count` | `4` |
 | field | `standings` | `Dad=3-1, Mum=2-2, …` (round robin / Swiss W–L), `Dad=21, Mum=17` (free-for-all points), `Dad=5, Mum=2` (king of the hill wins on top). Absent for brackets. |
 | field | `placings` | The full finishing order, best first — what the season points and ratings are built from. A bracket ranks by how long you lasted; every other format uses its own final standings. |
+| field | `replay` | The board exactly as it finished — the same string the helper holds. Feeding it back through the engine replays every round or match, which is what "Show how it was won" shows. A couple of hundred characters at most. |
 | field | `top_wins` | King of the hill only: the king's wins while holding the hill |
 | field | `games`, `sessions`, `last_played` | King of the hill only: running totals for the title and when it was last played |
 | field | `state` | King of the hill only: the snapshot the card uses to continue the title (players, king, queue, totals) |

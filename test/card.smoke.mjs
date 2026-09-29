@@ -144,6 +144,8 @@ async function playOut(card, hassFor) {
     card.hass = hassFor(saved);
   }
 }
+// The board a real tournament recorded, replayed further down.
+let recordedReplay = null;
 {
   saved = '';
   const ws = [];
@@ -170,8 +172,13 @@ async function playOut(card, hassFor) {
   ok(ws.length === 1 && ws[0].domain === 'rest_command' && ws[0].service === 'game_night_write'
      && ws[0].return_response === true, 'write went to rest_command.game_night_write with return_response');
   const line = ws[0].service_data.line;
-  ok(/^result,game=UNO,mode=double_elimination winner="[A-Za-z]+",runner_up="[A-Za-z]+",players="[^"]+",player_count=3i,placings="[^"]+" \d{10}$/.test(line),
+  ok(/^result,game=UNO,mode=double_elimination winner="[A-Za-z]+",runner_up="[A-Za-z]+",players="[^"]+",player_count=3i,replay="(\\.|[^"])+",placings="[^"]+" \d{10}$/.test(line),
      `line protocol shape (got ${line})`);
+  // The board is stored as it finished, so the history can replay it.
+  recordedReplay = line.match(/replay="((?:\\.|[^"])*)"/)[1].replace(/\\(.)/g, '$1');
+  const replay = JSON.parse(recordedReplay);
+  ok(Array.isArray(replay.p) && replay.p.length === 3 && typeof replay.w === 'string' && replay.w.length > 0,
+     `the stored board carries the players and every decision (${JSON.stringify(replay)})`);
   const placed = /placings="([^"]+)"/.exec(line)[1].split(', ');
   const winner = /winner="([^"]+)"/.exec(line)[1];
   const second = /runner_up="([^"]+)"/.exec(line)[1];
@@ -213,12 +220,12 @@ async function playOut(card, hassFor) {
   const DAY = 86400;
   const at = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d, 12) / 1000);
   const cols = ['time', 'winner', 'runner_up', 'players', 'player_count', 'placings',
-                'standings', 'top_wins', 'games', 'sessions', 'last_played', 'temp', 'game', 'mode'];
+                'standings', 'top_wins', 'games', 'sessions', 'last_played', 'temp', 'replay', 'game', 'mode'];
   const row = (time, game, mode, winner, runnerUp, players, placings, extra = {}) => ([
     time, winner, runnerUp, players.join(', '), players.length,
     placings ? placings.join(', ') : null, extra.standings ?? null, extra.top_wins ?? null,
     extra.games ?? null, extra.sessions ?? null, extra.last_played ?? null,
-    extra.temp ?? null, game, mode,
+    extra.temp ?? null, extra.replay ?? null, game, mode,
   ]);
   const thisYear = new Date().getFullYear();
   const values = [
@@ -228,8 +235,12 @@ async function playOut(card, hassFor) {
         ['Dad', 'Mum', 'Atlas'], ['Dad', 'Atlas', 'Mum']),
     row(at(thisYear, 9, 6), 'UNO', 'round_robin', 'Mum', 'Dad',
         ['Dad', 'Mum', 'Atlas'], ['Mum', 'Dad', 'Atlas']),
+    // Carries the board as it finished: three rounds of a four-player
+    // free-for-all, each chunk a finishing order of base-36 player indices.
     row(at(thisYear, 8, 30), 'Mario Kart', 'free_for_all', 'Atlas', 'Dad',
-        ['Atlas', 'Dad', 'Mum', 'Miles'], ['Atlas', 'Dad', 'Mum', 'Miles']),
+        ['Atlas', 'Dad', 'Mum', 'Miles'], ['Atlas', 'Dad', 'Mum', 'Miles'],
+        { replay: JSON.stringify({ v: 2, p: ['Atlas', 'Dad', 'Mum', 'Miles'],
+          w: '0123|0132|1023', x: 1, m: 'f', f: 1, g: 'Mario Kart' }) }),
     // A one-off: no belt, no win, but still listed and tagged.
     row(at(thisYear, 8, 1), 'Table tennis', 'king_of_the_hill', 'Guest', 'Mum',
         ['Guest', 'Mum'], null, { temp: true, top_wins: 2 }),
@@ -290,7 +301,7 @@ async function playOut(card, hassFor) {
 
   // --- head to head ---
   click('[data-view="h2h"]');
-  ok(/Finals won against/.test(txt()), 'the head-to-head grid is shown');
+  ok(/Wins against/.test(txt()), 'the head-to-head grid is shown');
   const matrix = h.shadowRoot.querySelector('table.matrix');
   ok(!!matrix && matrix.querySelectorAll('tr').length >= 4, 'the matrix has a row per finalist');
   ok(/Rivalries/.test(txt()) && /leads|all square/.test(txt()), 'rivalries are listed with who leads');
@@ -298,9 +309,82 @@ async function playOut(card, hassFor) {
   // --- history list ---
   click('[data-view="history"]');
   ok(/one-off/.test(txt()), 'the results list tags a one-off game');
+  ok(/Atlas won it — Dad 2nd/.test(txt()),
+     'a free-for-all names its runner-up without claiming a head-to-head win');
+  ok(/Dad<\/strong><\/button><span class="muted"> beat Mum/.test(h.shadowRoot.innerHTML),
+     'while a format with a final still reads "beat"');
   ok(/Guest/.test(txt()), 'and still lists it');
   const listRows = h.shadowRoot.querySelectorAll('table tr').length;
   ok(listRows === values.length, `every result is listed (${listRows} of ${values.length})`);
+
+  // --- the play-by-play behind a result ---
+  const ffaTime = at(thisYear, 8, 30);
+  const toggles = h.shadowRoot.querySelectorAll('[data-replay]');
+  ok(toggles.length === 1, `only the row that stored its board offers one (${toggles.length})`);
+  ok(toggles[0].getAttribute('data-replay') === String(ffaTime), 'and it is the free-for-all');
+  ok(!h.shadowRoot.querySelector('.replay'), 'nothing is expanded to begin with');
+  toggles[0].onclick();
+  const plays = [...h.shadowRoot.querySelectorAll('table.plays tr')]
+    .map((tr) => [...tr.children].map((td) => td.textContent.trim()));
+  ok(plays.length === 3, `every round is listed (${plays.length})`);
+  ok(plays[0][0] === 'Round 1' && plays[0][1] === '1. Atlas   2. Dad   3. Mum   4. Miles',
+     `each round shows its finishing order (${JSON.stringify(plays[0])})`);
+  ok(plays[1][1] === '1. Atlas   2. Dad   3. Miles   4. Mum', `round 2 differs (${plays[1][1]})`);
+  ok(plays[2][1] === '1. Dad   2. Atlas   3. Mum   4. Miles', `round 3 differs (${plays[2][1]})`);
+  ok(/Hide how it was won/.test(h.shadowRoot.textContent), 'the toggle knows it is open');
+  h.shadowRoot.querySelector('[data-replay]').onclick();
+  ok(!h.shadowRoot.querySelector('.replay'), 'and closes again');
+
+  // Round trip: a double-elimination bracket actually played out above,
+  // recorded, and read back as the list of matches that decided it.
+  const beRows = [row(at(thisYear, 8, 28), 'UNO', 'double_elimination', 'Dad', 'Mum',
+    ['Dad', 'Mum'], null, { replay: recordedReplay })];
+  const hBracket = document.createElement('bracket-history-card');
+  hBracket.setConfig({});
+  hBracket.hass = { states: {}, callWS: async () => ({ response: { status: 200,
+    content: { results: [{ series: [{ name: 'result', columns: cols, values: beRows }] }] } } }) };
+  await tick(); await tick();
+  hBracket.shadowRoot.querySelector('[data-view="history"]').onclick();
+  hBracket.shadowRoot.querySelector('[data-replay]').onclick();
+  const bp = [...hBracket.shadowRoot.querySelectorAll('table.plays tr')]
+    .map((tr) => [...tr.children].map((td) => td.textContent.trim()));
+  ok(bp.length >= 3, `a played-out bracket replays its matches (${bp.length})`);
+  ok(bp.every(([, d]) => / beat /.test(d)), `each one reads as a result (${JSON.stringify(bp[0])})`);
+  ok(bp.some(([l]) => /^Winners/.test(l)) && bp.some(([l]) => /Grand final|Losers/.test(l)),
+     `and is labelled by where in the bracket it was (${bp.map(([l]) => l).join(', ')})`);
+  ok(!bp.some(([, d]) => /bye|—/.test(d)), 'walkovers are not presented as results');
+
+  // King of the hill: each pair in `w` is a challenger letter and who won.
+  // Nobody starts as king, so the first game crowns one.
+  const kothRows = [row(at(thisYear, 8, 27), 'Darts', 'king_of_the_hill', 'Dad', 'Atlas',
+    ['Dad', 'Atlas', 'Mum'], null, { replay: JSON.stringify({ v: 2, p: ['Dad', 'Atlas', 'Mum'],
+      w: 'B2C1A2', x: 1, m: 'k', f: 1, g: 'Darts' }) })];
+  const hKoth = document.createElement('bracket-history-card');
+  hKoth.setConfig({});
+  hKoth.hass = { states: {}, callWS: async () => ({ response: { status: 200,
+    content: { results: [{ series: [{ name: 'result', columns: cols, values: kothRows }] }] } } }) };
+  await tick(); await tick();
+  hKoth.shadowRoot.querySelector('[data-view="history"]').onclick();
+  hKoth.shadowRoot.querySelector('[data-replay]').onclick();
+  const kp = [...hKoth.shadowRoot.querySelectorAll('table.plays tr')]
+    .map((tr) => [...tr.children].map((td) => td.textContent.trim()));
+  ok(kp.length === 3, `every challenge is listed (${kp.length})`);
+  ok(kp[0][0] === 'Game 1' && kp[0][1] === 'Atlas beat Dad — crowned',
+     `the first game crowns a king (${JSON.stringify(kp[0])})`);
+  ok(kp[1][1] === 'Atlas beat Mum — held the hill', `a defence reads as one (${kp[1][1]})`);
+  ok(kp[2][1] === 'Dad beat Atlas — took the hill', `and so does a takeover (${kp[2][1]})`);
+
+  // A board that can't be read says so rather than showing an empty drawer.
+  const brokenRows = [row(at(thisYear, 8, 29), 'UNO', 'free_for_all', 'Dad', 'Mum',
+    ['Dad', 'Mum'], null, { replay: 'not json' })];
+  const hBad = document.createElement('bracket-history-card');
+  hBad.setConfig({});
+  hBad.hass = { states: {}, callWS: async () => ({ response: { status: 200,
+    content: { results: [{ series: [{ name: 'result', columns: cols, values: brokenRows }] }] } } }) };
+  await tick(); await tick();
+  hBad.shadowRoot.querySelector('[data-view="history"]').onclick();
+  hBad.shadowRoot.querySelector('[data-replay]').onclick();
+  ok(/couldn't be read/.test(hBad.shadowRoot.textContent), 'an unreadable board says so');
 
   // --- a player page ---
   click('[data-view="champions"]');
