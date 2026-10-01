@@ -14,10 +14,50 @@
  * Unit-tested in test/stats.test.mjs.
  */
 
+import { kingOfTheHill } from './formats.js';
+
 const SEP = /\s*,\s*/;
 
 export const splitNames = (value) =>
   String(value || '').split(SEP).map((n) => n.trim()).filter(Boolean);
+
+/*
+ * The individual games inside a king-of-the-hill session.
+ *
+ * Unlike every other format, king of the hill is not one tournament with a
+ * final — it is a run of real two-player matches, each with a winner and a
+ * loser, and the recorded row only names who was holding the hill when the
+ * session ended. The matches themselves are in the board stored with the
+ * result, so this replays it and reads them back out.
+ *
+ * A row's board holds only that session's games; a lineage carried on from a
+ * previous evening keeps its earlier totals in `b`, which the engine starts
+ * from without replaying them. So summing across rows counts each game once.
+ *
+ * Returns [] for every other format, and for rows recorded before the board
+ * was stored — those can only ever know their champion and runner-up.
+ */
+export function kothMatches(row) {
+  if (!row || row.mode !== 'king_of_the_hill' || !row.replay) return [];
+  let board;
+  try { board = JSON.parse(row.replay); } catch (e) { return []; }
+  if (!board || !Array.isArray(board.p) || board.p.length < 2) return [];
+  const res = kingOfTheHill(
+    board.p,
+    typeof board.w === 'string' ? board.w : '',
+    true,
+    board.b && typeof board.b === 'object' ? board.b : null,
+  );
+  return (res.games || []).map((g) => {
+    const held = g.winner === 'king';
+    return {
+      n: g.n,
+      winner: board.p[held ? g.king : g.challenger],
+      loser: board.p[held ? g.challenger : g.king],
+      crowning: !!g.crowning,
+    };
+  }).filter((m) => m.winner && m.loser && m.winner !== m.loser);
+}
 
 /* A one-off king-of-the-hill game doesn't hold a title or count as a win. */
 export const isReal = (row) => row && row.temp !== true && !!row.winner;
@@ -180,6 +220,7 @@ export function leaderboard(rows, opts = {}) {
     if (!table.has(name)) {
       table.set(name, {
         name, wins: 0, runnerUps: 0, appearances: 0, points: 0,
+        matchWins: 0, matchLosses: 0,
         firstPlayed: null, lastPlayed: null, lastWin: null,
         bestField: 0, byGame: new Map(), byMode: new Map(),
         beat: new Map(), lostTo: new Map(), results: [],
@@ -191,6 +232,9 @@ export function leaderboard(rows, opts = {}) {
   for (const row of ordered) {
     const places = ranked(row);
     const field = Math.max(places.length, Number(row.player_count) || 0);
+    // King of the hill knows every game that was played, so who beat whom
+    // comes from those rather than from the champion and the runner-up.
+    const matches = kothMatches(row);
     for (const { name, rank } of places) {
       const p = player(name);
       p.appearances += 1;
@@ -212,14 +256,24 @@ export function leaderboard(rows, opts = {}) {
         p.bestField = Math.max(p.bestField, field);
         g.wins += 1;
         m.wins += 1;
-        if (row.runner_up) p.beat.set(row.runner_up, (p.beat.get(row.runner_up) || 0) + 1);
+        if (row.runner_up && !matches.length) p.beat.set(row.runner_up, (p.beat.get(row.runner_up) || 0) + 1);
       }
       if (rank === 2 && row.winner) {
         p.runnerUps += 1;
-        p.lostTo.set(row.winner, (p.lostTo.get(row.winner) || 0) + 1);
+        if (!matches.length) p.lostTo.set(row.winner, (p.lostTo.get(row.winner) || 0) + 1);
       }
       p.byGame.set(game, g);
       p.byMode.set(mode, m);
+    }
+
+    // Each challenge for the hill is a result in its own right.
+    for (const match of matches) {
+      const won = player(match.winner);
+      const lost = player(match.loser);
+      won.matchWins += 1;
+      lost.matchLosses += 1;
+      won.beat.set(match.loser, (won.beat.get(match.loser) || 0) + 1);
+      lost.lostTo.set(match.winner, (lost.lostTo.get(match.winner) || 0) + 1);
     }
   }
 
@@ -324,6 +378,11 @@ export function seasons(rows) {
  * most points takes it, so winning it is a win over each of the other players
  * at once: four players, three results. Not one per round — the match is the
  * unit, however many rounds it took.
+ *
+ * King of the hill is the opposite case: it is nothing but head-to-heads.
+ * Every challenge is two people playing each other for the hill, so each one
+ * counts on its own. The recorded row's champion is who held the hill at the
+ * end — that is what the ongoing title is for, not a summary of the evening.
  */
 export function headToHead(rows) {
   const names = new Set();
@@ -339,9 +398,14 @@ export function headToHead(rows) {
     if (!row.winner) continue;
     if (row.mode === 'free_for_all') {
       for (const name of splitNames(row.players)) beat(row.winner, name);
-    } else if (row.runner_up) {
-      beat(row.winner, row.runner_up);
+      continue;
     }
+    const matches = kothMatches(row);
+    if (matches.length) {
+      for (const m of matches) beat(m.winner, m.loser);
+      continue;
+    }
+    if (row.runner_up) beat(row.winner, row.runner_up);
   }
   const list = [...names].sort((a, b) => a.localeCompare(b));
   return {

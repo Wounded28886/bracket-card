@@ -295,12 +295,25 @@ pair has met.
 
 How a win is counted depends on how it was won:
 
+- **King of the hill** is nothing but head-to-heads: every challenge is two
+  people playing each other for the hill, so each one counts on its own. Six
+  games in an evening is six results. The recorded row's champion is whoever
+  held the hill at the end — that is what the ongoing title tracks, not a
+  summary of who beat whom.
 - A **free-for-all** has no final. Everyone plays every round together and the
   most points takes it, so winning one is a win over *each* of the other
   players — four players, three results. It counts once for the match, not
   once per round, and finishing second beats nobody.
 - **Every other format** ends in a final between two people, so a result is
   one win over the runner-up and no one else.
+
+King-of-the-hill games also give each player a **match record** (W–L) on their
+page, counted from the games themselves. Winning the session is still one win
+on the leaderboard — the two measure different things, and both are shown.
+
+Reading the games needs the board stored with the result, so this applies from
+v1.10.0 onward. King-of-the-hill rows recorded before that fall back to
+champion-over-runner-up, as they always were.
 
 **History.** Every result, newest first, with the full finishing order — and
 **"Show how it was won"**, which expands the row into what actually happened:

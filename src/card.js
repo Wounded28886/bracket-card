@@ -44,7 +44,7 @@ import {
   biggestWins, ELO_START,
 } from './stats.js';
 
-const CARD_VERSION = '1.9.0';
+const CARD_VERSION = '1.10.0';
 
 /* ---------- formats ---------- */
 // Mode is stored as a single character in the helper.
@@ -1820,7 +1820,8 @@ class BracketHistoryCard extends HTMLElement {
     const grid = `
       <div class="pad">
         <div class="sub">Wins against</div>
-        <div class="muted tiny">Winning a free-for-all counts as a win over everyone who played it.
+        <div class="muted tiny">King of the hill counts every challenge, since each one is two people
+          playing each other. Winning a free-for-all counts as a win over everyone who played it.
           Every other format counts the final, so only the runner-up.</div>
         <div class="scroll tight">
           <table class="matrix">
@@ -1836,7 +1837,7 @@ class BracketHistoryCard extends HTMLElement {
               </tr>`).join('')}
           </table>
         </div>
-        <p class="muted tiny">Read across: how often that player has beaten each other player in a final.</p>
+        <p class="muted tiny">Read across: how often that player has beaten each other player.</p>
       </div>`;
 
     const rivalBlock = rivals.length ? `
@@ -1849,7 +1850,7 @@ class BracketHistoryCard extends HTMLElement {
                 <span class="muted">v</span>
                 <button class="linkish" data-player="${esc(r.b)}">${esc(r.b)}</button></td>
               <td class="num"><strong>${r.aWins}–${r.bWins}</strong></td>
-              <td class="muted">${r.leader ? `${esc(r.leader)} leads` : 'all square'} · ${r.meetings} final${r.meetings === 1 ? '' : 's'}</td>
+              <td class="muted">${r.leader ? `${esc(r.leader)} leads` : 'all square'} · ${r.meetings} meeting${r.meetings === 1 ? '' : 's'}</td>
             </tr>`).join('')}
         </table>
       </div>` : '';
@@ -2037,6 +2038,9 @@ class BracketHistoryCard extends HTMLElement {
         ${stat('Rating', p.rating)}
         ${stat('Runner-up', p.runnerUps)}
         ${stat('Best field', p.bestField || '—', p.bestField ? `${p.bestField} players` : '')}
+        ${p.matchWins + p.matchLosses
+          ? stat('Matches', `${p.matchWins}–${p.matchLosses}`, 'games on the hill')
+          : ''}
       </div>
       <div class="pad">
         <div class="sub">Form</div>

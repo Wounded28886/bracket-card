@@ -1,6 +1,7 @@
+import { kingOfTheHill, kothSnapshot } from '../src/formats.js';
 import {
   ranked, belts, leaderboard, seasons, headToHead, rivalries, onThisDay,
-  byFormat, elo, pointsFor, biggestWins, splitNames, ELO_START,
+  byFormat, elo, pointsFor, biggestWins, splitNames, kothMatches, ELO_START,
 } from '../src/stats.js';
 
 let pass = 0, fail = 0;
@@ -187,6 +188,76 @@ section('head to head');
     'finishing above someone in a free-for-all is not itself a win over them');
   assert(ten.meetings('Miles', 'Dad') === 1 && ten.meetings('Atlas', 'Dad') === 0,
     'so the only meetings it creates are with the winner');
+
+  // King of the hill is nothing but head-to-heads, so every challenge counts.
+  // B2 C1 A2 C1: Atlas crowns himself against Dad, holds off Mum, loses the
+  // hill back to Dad, who then holds it against Mum.
+  const hill = [{ time: at(2026, 9, 27), game: 'Darts', mode: 'king_of_the_hill',
+    winner: 'Dad', runner_up: 'Atlas', players: 'Dad, Atlas, Mum', player_count: 3,
+    placings: 'Dad, Atlas, Mum', top_wins: 1,
+    replay: JSON.stringify({ v: 2, p: ['Dad', 'Atlas', 'Mum'], w: 'B2C1A2C1', x: 1, m: 'k', f: 1 }) }];
+  const games = kothMatches(hill[0]);
+  assert(games.length === 4, `every game in the session is read back (${games.length})`);
+  assert(games[0].winner === 'Atlas' && games[0].loser === 'Dad' && games[0].crowning,
+    `the first game crowns someone (${JSON.stringify(games[0])})`);
+
+  const hh = headToHead(hill);
+  assert(hh.wins('Atlas', 'Dad') === 1 && hh.wins('Dad', 'Atlas') === 1,
+    `the hill changing hands counts both ways (Atlas ${hh.wins('Atlas', 'Dad')}, Dad ${hh.wins('Dad', 'Atlas')})`);
+  assert(hh.wins('Atlas', 'Mum') === 1 && hh.wins('Dad', 'Mum') === 1,
+    `defences count against whoever challenged (Atlas ${hh.wins('Atlas', 'Mum')}, Dad ${hh.wins('Dad', 'Mum')})`);
+  assert(hh.meetings('Dad', 'Atlas') === 2, `and both meetings are counted once each (${hh.meetings('Dad', 'Atlas')})`);
+  assert(hh.wins('Mum', 'Dad') === 0 && hh.wins('Mum', 'Atlas') === 0, 'losing every game beats nobody');
+
+  // Wins and losses follow the same games.
+  const hb = leaderboard(hill);
+  const rec = (n) => { const p = hb.find((x) => x.name === n); return `${p.matchWins}-${p.matchLosses}`; };
+  assert(rec('Atlas') === '2-1' && rec('Dad') === '2-1' && rec('Mum') === '0-2',
+    `match records come from the games (Atlas ${rec('Atlas')}, Dad ${rec('Dad')}, Mum ${rec('Mum')})`);
+  assert(hb.reduce((n, p) => n + p.matchWins, 0) === 4
+    && hb.reduce((n, p) => n + p.matchLosses, 0) === 4, 'four games, four wins and four losses');
+  const dad = hb.find((x) => x.name === 'Dad');
+  assert(dad.wins === 1, 'and holding the hill at the end is still the one tournament win');
+  assert(dad.favouriteVictim.name === 'Atlas' || dad.favouriteVictim.name === 'Mum',
+    `who they beat comes from the games too (${JSON.stringify(dad.favouriteVictim)})`);
+
+  // A row recorded before boards were stored falls back to the old reading.
+  const old = [{ ...hill[0], replay: undefined }];
+  const oh = headToHead(old);
+  assert(oh.wins('Dad', 'Atlas') === 1 && oh.wins('Atlas', 'Dad') === 0 && oh.wins('Dad', 'Mum') === 0,
+    'without a stored board it is champion over runner-up, as before');
+  assert(leaderboard(old).every((p) => p.matchWins === 0 && p.matchLosses === 0),
+    'and there are no match records to show');
+  assert(kothMatches({ mode: 'king_of_the_hill', replay: 'not json' }).length === 0,
+    'an unreadable board yields nothing rather than throwing');
+
+  // A title carried on to another evening writes a second row holding only
+  // that evening's games, with the earlier state as its starting point. The
+  // two rows together must count every game once — not replay the first
+  // evening twice.
+  const roster = ['Dad', 'Atlas', 'Mum'];
+  const night1 = kingOfTheHill(roster, 'B2C1A2C1', true, null);
+  const carried = kothSnapshot(night1);
+  const night2 = kingOfTheHill(roster, 'B2C1', true, carried);
+  assert(night1.games.length === 4 && night2.games.length === 2,
+    `each evening's board holds only its own games (${night1.games.length} then ${night2.games.length})`);
+  assert(night2.totalGames === 6, `while the running total carries over (${night2.totalGames})`);
+  assert(night2.games[0].n === 5, `and the numbering continues (${night2.games[0].n})`);
+
+  const lineage = [
+    { time: at(2026, 9, 27), game: 'Darts', mode: 'king_of_the_hill', winner: 'Dad',
+      runner_up: 'Atlas', players: roster.join(', '), player_count: 3,
+      replay: JSON.stringify({ v: 2, p: roster, w: 'B2C1A2C1', x: 1, m: 'k', f: 1 }) },
+    { time: at(2026, 9, 28), game: 'Darts', mode: 'king_of_the_hill', winner: 'Atlas',
+      runner_up: 'Dad', players: roster.join(', '), player_count: 3,
+      replay: JSON.stringify({ v: 2, p: roster, w: 'B2C1', x: 1, m: 'k', f: 1, b: carried }) },
+  ];
+  const lb = leaderboard(lineage);
+  const played = lb.reduce((n, p) => n + p.matchWins + p.matchLosses, 0);
+  assert(played === 12, `six games across two evenings, counted once each (${played / 2} games)`);
+  const lh = headToHead(lineage);
+  assert(lh.meetings('Dad', 'Atlas') + lh.meetings('Dad', 'Mum') + lh.meetings('Atlas', 'Mum') === 6,
+    'and the head-to-head sees six meetings, not ten');
 
   const r = rivalries(ROWS);
   assert(r.length >= 1 && r[0].meetings === 3, `most-met pair first (${JSON.stringify(r[0])})`);
